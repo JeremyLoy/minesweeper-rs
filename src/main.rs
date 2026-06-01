@@ -126,6 +126,9 @@ struct Settings {
     question_marks: bool,
     /// Whether to forbid placing more flags than there are mines.
     flag_guard: bool,
+    /// Whether the first click is guaranteed to open a region (spare the whole
+    /// 3x3 around it) rather than merely being safe (spare only the click).
+    open_guarantee: bool,
 }
 
 impl Default for Settings {
@@ -133,6 +136,7 @@ impl Default for Settings {
         Settings {
             question_marks: true,
             flag_guard: false,
+            open_guarantee: true,
         }
     }
 }
@@ -249,29 +253,33 @@ impl Minesweeper {
         self.pending_resize = true;
     }
 
-    /// Place mines after the first click, keeping the clicked cell and its
-    /// neighbors mine-free so the opening move reveals an area.
-    fn place_mines(&mut self, safe_r: usize, safe_c: usize) {
-        let mut candidates: Vec<(usize, usize)> = Vec::new();
+    /// Cells eligible to hold a mine: everything outside the Chebyshev-distance
+    /// `radius` square centered on the first click. `radius == 1` spares the 3x3
+    /// safe zone; `radius == 0` spares only the clicked cell.
+    fn safe_candidates(&self, safe_r: usize, safe_c: usize, radius: usize) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
         for r in 0..self.rows {
             for c in 0..self.cols {
-                let near = r.abs_diff(safe_r) <= 1 && c.abs_diff(safe_c) <= 1;
+                let near = r.abs_diff(safe_r) <= radius && c.abs_diff(safe_c) <= radius;
                 if !near {
-                    candidates.push((r, c));
+                    out.push((r, c));
                 }
             }
         }
-        // Usually there is room, but guard anyway: if excluding the whole 3x3
-        // safe zone leaves too few cells, fall back to only the click.
+        out
+    }
+
+    /// Place mines after the first click. With `open_guarantee` the whole 3x3
+    /// around the click is spared, so the clicked cell has zero adjacent mines
+    /// and the opening reveal always floods into a region; otherwise only the
+    /// clicked cell is spared (still safe, but the first reveal may be a number).
+    fn place_mines(&mut self, safe_r: usize, safe_c: usize) {
+        let radius = if self.settings.open_guarantee { 1 } else { 0 };
+        let mut candidates = self.safe_candidates(safe_r, safe_c, radius);
+        // If the board is too dense for the requested safe zone, spare only the
+        // click so there is always room for every mine.
         if candidates.len() < self.mines {
-            candidates.clear();
-            for r in 0..self.rows {
-                for c in 0..self.cols {
-                    if (r, c) != (safe_r, safe_c) {
-                        candidates.push((r, c));
-                    }
-                }
-            }
+            candidates = self.safe_candidates(safe_r, safe_c, 0);
         }
 
         // Partial Fisher–Yates: pick the first `mines` after shuffling.
@@ -562,6 +570,10 @@ impl eframe::App for Minesweeper {
                         .on_hover_text("Right-click cycles a question mark after the flag");
                     ui.checkbox(&mut self.settings.flag_guard, "Flag guard")
                         .on_hover_text("Don't allow more flags than there are mines");
+                    ui.checkbox(&mut self.settings.open_guarantee, "Guaranteed opening")
+                        .on_hover_text(
+                            "First click always opens an empty region, not a bare number",
+                        );
                 });
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1023,6 +1035,35 @@ mod tests {
         g.toggle_flag(0, 0);
         g.toggle_flag(0, 1);
         assert_eq!(g.flags, 2);
+    }
+
+    #[test]
+    fn open_guarantee_clears_the_whole_first_click_neighborhood() {
+        // Run several times: the RNG-seeded placement must always spare the 3x3.
+        for _ in 0..20 {
+            let mut g = Minesweeper::new(Difficulty::Beginner);
+            g.settings.open_guarantee = true;
+            g.place_mines(4, 4);
+            assert!(!g.grid[4][4].mine);
+            assert_eq!(g.grid[4][4].adjacent, 0, "click must open a region");
+            for (nr, nc) in g.neighbors(4, 4) {
+                assert!(!g.grid[nr][nc].mine, "3x3 safe zone must be mine-free");
+            }
+            assert_eq!(mine_count(&g), g.mines);
+        }
+    }
+
+    #[test]
+    fn without_open_guarantee_only_the_click_is_spared() {
+        for _ in 0..20 {
+            let mut g = Minesweeper::new(Difficulty::Beginner);
+            g.settings.open_guarantee = false;
+            g.place_mines(4, 4);
+            // The clicked cell itself is always safe...
+            assert!(!g.grid[4][4].mine);
+            // ...and the full mine count is still placed.
+            assert_eq!(mine_count(&g), g.mines);
+        }
     }
 
     #[test]

@@ -6,9 +6,6 @@ mine count are the consts `ROWS` / `COLS` / `MINES` in `src/main.rs`.
 
 ## Gameplay features
 
-- [ ] **First-click opening guarantee** — optionally regenerate the board until
-      the first click opens a zero-region (currently the 3×3 safe zone makes this
-      likely but not guaranteed).
 - [ ] **Lose animation / reveal** — show which flags were wrong (✗) and which
       mines were missed, like classic Minesweeper, instead of just exposing mines.
 - [x] **Difficulty selector** — Beginner (9×9 / 10), Intermediate (16×16 / 40),
@@ -26,6 +23,10 @@ mine count are the consts `ROWS` / `COLS` / `MINES` in `src/main.rs`.
       doesn't drop a flag) and fires the chord on release.
 - [x] **Flag-count guard** — optional `flag_guard` setting (in the new Options
       menu) that refuses to place more flags than there are mines.
+- [x] **First-click opening guarantee** — `open_guarantee` setting (default on).
+      On, the whole 3×3 around the first click is spared, so the clicked cell has
+      zero adjacent mines and always floods open a region; off, only the clicked
+      cell is spared (safe, but the first reveal may be a bare number).
 
 ## Persistence & meta
 
