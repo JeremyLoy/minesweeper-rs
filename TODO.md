@@ -6,8 +6,6 @@ mine count are the consts `ROWS` / `COLS` / `MINES` in `src/main.rs`.
 
 ## Gameplay features
 
-- [ ] **Chord with both mouse buttons** — support the traditional left+right
-      simultaneous click to chord, in addition to the current left-click-on-number.
 - [ ] **Flag-count guard** — optionally prevent placing more flags than there are
       mines.
 - [ ] **First-click opening guarantee** — optionally regenerate the board until
@@ -24,6 +22,10 @@ mine count are the consts `ROWS` / `COLS` / `MINES` in `src/main.rs`.
       (Hidden → Flagged → Question → Hidden), as a toggleable option (the `?`
       checkbox in the header). `?` cells are reminders only — not protected, so
       they still reveal and flood like hidden cells. Persisted in `Settings`.
+- [x] **Chord with both mouse buttons** — holding left+right over a revealed
+      number and releasing chords it, alongside the existing left-click-on-number.
+      The gesture suppresses the individual clicks (so the right-button release
+      doesn't drop a flag) and fires the chord on release.
 
 ## Persistence & meta
 

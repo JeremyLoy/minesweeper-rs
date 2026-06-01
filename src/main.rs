@@ -180,6 +180,12 @@ struct Minesweeper {
     /// Set when the board changes; the next frame resizes the OS window to fit.
     pending_resize: bool,
     settings: Settings,
+    /// Transient input state for the both-button chord gesture: the revealed
+    /// cell currently under the cursor while both buttons are held, and whether
+    /// such a gesture is in progress (so the eventual button release chords
+    /// instead of revealing/flagging).
+    armed_chord: Option<(usize, usize)>,
+    chord_gesture: bool,
 }
 
 impl Minesweeper {
@@ -210,6 +216,8 @@ impl Minesweeper {
             custom_mines: mines,
             pending_resize: false,
             settings: Settings::default(),
+            armed_chord: None,
+            chord_gesture: false,
         }
     }
 
@@ -585,6 +593,16 @@ impl eframe::App for Minesweeper {
             let mut left_click: Option<(usize, usize)> = None;
             let mut right_click: Option<(usize, usize)> = None;
 
+            // Both-button chord: while both mouse buttons are held, remember the
+            // revealed cell under the cursor; chord it once both are released.
+            let (primary_down, secondary_down) =
+                ui.input(|i| (i.pointer.primary_down(), i.pointer.secondary_down()));
+            let both_down = primary_down && secondary_down;
+            let any_down = primary_down || secondary_down;
+            if both_down {
+                self.chord_gesture = true;
+            }
+
             ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
             for r in 0..self.rows {
                 ui.horizontal(|ui| {
@@ -596,8 +614,26 @@ impl eframe::App for Minesweeper {
                         if resp.secondary_clicked() {
                             right_click = Some((r, c));
                         }
+                        if both_down && resp.hovered() {
+                            self.armed_chord = Some((r, c));
+                        }
                     }
                 });
+            }
+
+            // A chord gesture swallows the individual clicks its buttons would
+            // otherwise produce (notably the right-button "flag" on release).
+            if self.chord_gesture {
+                left_click = None;
+                right_click = None;
+                if !any_down {
+                    if let Some((r, c)) = self.armed_chord {
+                        // reveal() routes a click on a revealed cell to chord().
+                        self.reveal(r, c);
+                    }
+                    self.chord_gesture = false;
+                    self.armed_chord = None;
+                }
             }
 
             if let Some((r, c)) = left_click {
@@ -903,6 +939,57 @@ mod tests {
         g.reveal(0, 0);
         // A "?" cell reveals like a hidden one (it is not protected).
         assert_eq!(g.grid[0][0].state, CellState::Revealed);
+    }
+
+    /// Fill in adjacency counts for a hand-placed board (place_mines also does
+    /// this, but tests that set mines manually need it on its own).
+    fn recompute_adjacency(g: &mut Minesweeper) {
+        for r in 0..g.rows {
+            for c in 0..g.cols {
+                if g.grid[r][c].mine {
+                    continue;
+                }
+                let count = g
+                    .neighbors(r, c)
+                    .filter(|&(nr, nc)| g.grid[nr][nc].mine)
+                    .count() as u8;
+                g.grid[r][c].adjacent = count;
+            }
+        }
+    }
+
+    #[test]
+    fn chord_reveals_neighbors_when_flags_match() {
+        let mut g = Minesweeper::with_dims(3, 3, 1, Difficulty::Custom);
+        g.grid[0][0].mine = true;
+        g.mines_placed = true;
+        recompute_adjacency(&mut g);
+
+        // Reveal the center (adjacent == 1, so it reveals only itself).
+        g.reveal(1, 1);
+        assert_eq!(g.grid[1][1].state, CellState::Revealed);
+        assert_eq!(g.grid[1][1].adjacent, 1);
+
+        // Flagging the one mine satisfies the center; chording it opens the rest.
+        g.toggle_flag(0, 0);
+        g.reveal(1, 1); // a click on a revealed cell chords
+        assert_eq!(g.grid[0][1].state, CellState::Revealed);
+        assert_eq!(g.grid[1][0].state, CellState::Revealed);
+        assert_eq!(g.grid[0][0].state, CellState::Flagged);
+    }
+
+    #[test]
+    fn chord_is_a_noop_when_flags_do_not_match() {
+        let mut g = Minesweeper::with_dims(3, 3, 1, Difficulty::Custom);
+        g.grid[0][0].mine = true;
+        g.mines_placed = true;
+        recompute_adjacency(&mut g);
+
+        g.reveal(1, 1);
+        // No flags placed yet: chording the center must reveal nothing new.
+        g.reveal(1, 1);
+        assert_eq!(g.grid[0][1].state, CellState::Hidden);
+        assert_eq!(g.grid[1][0].state, CellState::Hidden);
     }
 
     #[test]
