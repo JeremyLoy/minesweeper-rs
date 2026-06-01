@@ -24,21 +24,32 @@ const WIN_PAD_W: f32 = 24.0;
 const WIN_PAD_H: f32 = 132.0;
 
 fn main() -> eframe::Result {
-    let (rows, cols, _mines) = Difficulty::Beginner.dims().unwrap();
-    let size = window_size(rows, cols);
+    let data = SaveData::load();
+    // Restore the last board (presets have fixed dims; Custom uses saved dims).
+    let (rows, cols, mines) = data.last_difficulty.dims().unwrap_or(data.custom);
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size(window_size(rows, cols))
+        .with_resizable(false)
+        .with_title("Minesweeper");
+    if let Some((x, y)) = data.window_pos {
+        viewport = viewport.with_position([x, y]);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size(size)
-            .with_resizable(false)
-            .with_title("Minesweeper"),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(
         "Minesweeper",
         options,
-        Box::new(|_cc| {
-            let mut app = Minesweeper::new(Difficulty::Beginner);
-            app.save = SaveData::load();
+        Box::new(move |_cc| {
+            // Presets build straight from the difficulty; Custom needs the dims.
+            let mut app = match data.last_difficulty {
+                Difficulty::Custom => Minesweeper::with_dims(rows, cols, mines, Difficulty::Custom),
+                preset => Minesweeper::new(preset),
+            };
+            app.save = data;
+            app.settings = data.settings;
+            (app.custom_rows, app.custom_cols, app.custom_mines) = data.custom;
             Ok(Box::new(app))
         }),
     )
@@ -53,7 +64,7 @@ fn window_size(rows: usize, cols: usize) -> egui::Vec2 {
 }
 
 /// The selectable difficulty presets, plus a free-form Custom board.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Difficulty {
     Beginner,
     Intermediate,
@@ -81,6 +92,17 @@ impl Difficulty {
             Difficulty::Expert => "Expert",
             Difficulty::Custom => "Custom",
         }
+    }
+
+    /// Inverse of `label`, for reading the persisted last difficulty.
+    fn from_label(s: &str) -> Option<Difficulty> {
+        Some(match s {
+            "Beginner" => Difficulty::Beginner,
+            "Intermediate" => Difficulty::Intermediate,
+            "Expert" => Difficulty::Expert,
+            "Custom" => Difficulty::Custom,
+            _ => return None,
+        })
     }
 
     /// Index into the persisted best-times array. Only the three presets are
@@ -135,7 +157,7 @@ enum CellState {
 
 /// Player-chosen options that persist across new games (they are not part of a
 /// single board's state, so `reset`/`apply_board` carry them over).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 struct Settings {
     /// Whether right-click cycles through a "?" state (Hidden → Flag → ? → Hidden).
     question_marks: bool,
@@ -496,6 +518,16 @@ impl Minesweeper {
         false
     }
 
+    /// Sync the live settings / difficulty / custom dims into the save data and
+    /// write it to disk. Called from the UI on changes and on exit (kept out of
+    /// the pure logic methods so tests never touch the filesystem).
+    fn persist(&mut self) {
+        self.save.settings = self.settings;
+        self.save.last_difficulty = self.difficulty;
+        self.save.custom = (self.custom_rows, self.custom_cols, self.custom_mines);
+        self.save.save();
+    }
+
     fn freeze_time(&mut self) {
         if let Some(start) = self.start {
             self.final_time = Some(start.elapsed().as_secs_f64());
@@ -541,11 +573,31 @@ impl Minesweeper {
 
 /// Everything we remember between runs. Grows over time; the parser tolerates
 /// missing keys, so old files load fine after new fields are added.
-#[derive(Clone, Copy, PartialEq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 struct SaveData {
     /// Best (lowest) completion time in seconds per preset, in `preset_index`
     /// order. `None` means no record yet.
     best: [Option<u32>; 3],
+    /// Option toggles to restore.
+    settings: Settings,
+    /// The difficulty selected last run.
+    last_difficulty: Difficulty,
+    /// Last Custom-dialog dimensions, as `(rows, cols, mines)`.
+    custom: (usize, usize, usize),
+    /// Last OS-window top-left position, if known.
+    window_pos: Option<(f32, f32)>,
+}
+
+impl Default for SaveData {
+    fn default() -> Self {
+        SaveData {
+            best: [None; 3],
+            settings: Settings::default(),
+            last_difficulty: Difficulty::Beginner,
+            custom: (9, 9, 10),
+            window_pos: None,
+        }
+    }
 }
 
 impl SaveData {
@@ -557,6 +609,26 @@ impl SaveData {
                 s.push_str(&format!("{key}={v}\n"));
             }
         }
+        s.push_str(&format!(
+            "question_marks={}\n",
+            self.settings.question_marks as u8
+        ));
+        s.push_str(&format!("flag_guard={}\n", self.settings.flag_guard as u8));
+        s.push_str(&format!(
+            "open_guarantee={}\n",
+            self.settings.open_guarantee as u8
+        ));
+        s.push_str(&format!(
+            "last_difficulty={}\n",
+            self.last_difficulty.label()
+        ));
+        s.push_str(&format!("custom_rows={}\n", self.custom.0));
+        s.push_str(&format!("custom_cols={}\n", self.custom.1));
+        s.push_str(&format!("custom_mines={}\n", self.custom.2));
+        if let Some((x, y)) = self.window_pos {
+            s.push_str(&format!("win_x={}\n", x as i64));
+            s.push_str(&format!("win_y={}\n", y as i64));
+        }
         s
     }
 
@@ -566,10 +638,46 @@ impl SaveData {
             let Some((k, v)) = line.split_once('=') else {
                 continue;
             };
-            match k.trim() {
-                "best_beginner" => d.best[0] = v.trim().parse().ok(),
-                "best_intermediate" => d.best[1] = v.trim().parse().ok(),
-                "best_expert" => d.best[2] = v.trim().parse().ok(),
+            let (k, v) = (k.trim(), v.trim());
+            match k {
+                "best_beginner" => d.best[0] = v.parse().ok(),
+                "best_intermediate" => d.best[1] = v.parse().ok(),
+                "best_expert" => d.best[2] = v.parse().ok(),
+                "question_marks" => d.settings.question_marks = v == "1",
+                "flag_guard" => d.settings.flag_guard = v == "1",
+                "open_guarantee" => d.settings.open_guarantee = v == "1",
+                "last_difficulty" => {
+                    if let Some(df) = Difficulty::from_label(v) {
+                        d.last_difficulty = df;
+                    }
+                }
+                "custom_rows" => {
+                    if let Ok(n) = v.parse() {
+                        d.custom.0 = n;
+                    }
+                }
+                "custom_cols" => {
+                    if let Ok(n) = v.parse() {
+                        d.custom.1 = n;
+                    }
+                }
+                "custom_mines" => {
+                    if let Ok(n) = v.parse() {
+                        d.custom.2 = n;
+                    }
+                }
+                "win_x" => {
+                    if let Ok(n) = v.parse::<f32>() {
+                        let y = d.window_pos.map_or(0.0, |p| p.1);
+                        d.window_pos = Some((n, y));
+                    }
+                }
+                "win_y" => {
+                    if let Ok(n) = v.parse::<f32>() {
+                        let x = d.window_pos.map_or(0.0, |p| p.0);
+                        d.window_pos = Some((x, n));
+                    }
+                }
                 _ => {}
             }
         }
@@ -651,6 +759,11 @@ impl eframe::App for Minesweeper {
                 .request_repaint_after(std::time::Duration::from_millis(200));
         }
 
+        // Track the window position each frame so `on_exit` can persist it.
+        if let Some(rect) = ui.ctx().input(|i| i.viewport().outer_rect) {
+            self.save.window_pos = Some((rect.min.x, rect.min.y));
+        }
+
         egui::Panel::top("header").show_inside(ui, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -708,21 +821,34 @@ impl eframe::App for Minesweeper {
                     });
                 if let Some(d) = chosen {
                     match d.dims() {
-                        Some((rows, cols, mines)) => self.apply_board(rows, cols, mines, d),
+                        Some((rows, cols, mines)) => {
+                            self.apply_board(rows, cols, mines, d);
+                            self.persist();
+                        }
                         // Custom: open the dialog instead of switching immediately.
                         None => self.show_custom = true,
                     }
                 }
 
                 ui.menu_button("Options", |ui| {
-                    ui.checkbox(&mut self.settings.question_marks, "Question marks (?)")
-                        .on_hover_text("Right-click cycles a question mark after the flag");
-                    ui.checkbox(&mut self.settings.flag_guard, "Flag guard")
-                        .on_hover_text("Don't allow more flags than there are mines");
-                    ui.checkbox(&mut self.settings.open_guarantee, "Guaranteed opening")
+                    let mut changed = false;
+                    changed |= ui
+                        .checkbox(&mut self.settings.question_marks, "Question marks (?)")
+                        .on_hover_text("Right-click cycles a question mark after the flag")
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut self.settings.flag_guard, "Flag guard")
+                        .on_hover_text("Don't allow more flags than there are mines")
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut self.settings.open_guarantee, "Guaranteed opening")
                         .on_hover_text(
                             "First click always opens an empty region, not a bare number",
-                        );
+                        )
+                        .changed();
+                    if changed {
+                        self.persist();
+                    }
                 });
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -821,6 +947,12 @@ impl eframe::App for Minesweeper {
             }
         });
     }
+
+    /// Persist on shutdown so the window position and any settings/difficulty
+    /// changes survive even when they weren't separately saved this run.
+    fn on_exit(&mut self) {
+        self.persist();
+    }
 }
 
 impl Minesweeper {
@@ -860,6 +992,7 @@ impl Minesweeper {
         if start {
             let (r, c, m) = (self.custom_rows, self.custom_cols, self.custom_mines);
             self.apply_board(r, c, m, Difficulty::Custom);
+            self.persist();
             self.show_custom = false;
         } else if !open {
             self.show_custom = false;
@@ -1290,6 +1423,14 @@ mod tests {
     fn savedata_roundtrips_through_text() {
         let d = SaveData {
             best: [Some(12), None, Some(305)],
+            settings: Settings {
+                question_marks: false,
+                flag_guard: true,
+                open_guarantee: false,
+            },
+            last_difficulty: Difficulty::Expert,
+            custom: (11, 22, 33),
+            window_pos: Some((100.0, 250.0)),
         };
         assert_eq!(SaveData::parse(&d.serialize()), d);
     }
@@ -1298,6 +1439,20 @@ mod tests {
     fn savedata_parse_ignores_garbage_and_missing_keys() {
         let d = SaveData::parse("best_beginner=7\njunk line\nbest_expert=not_a_number\n");
         assert_eq!(d.best, [Some(7), None, None]);
+        // Unspecified keys keep their defaults.
+        assert_eq!(d.last_difficulty, Difficulty::Beginner);
+        assert_eq!(d.settings, Settings::default());
+    }
+
+    #[test]
+    fn savedata_restores_settings_and_difficulty() {
+        let text =
+            "question_marks=0\nflag_guard=1\nopen_guarantee=0\nlast_difficulty=Intermediate\n";
+        let d = SaveData::parse(text);
+        assert!(!d.settings.question_marks);
+        assert!(d.settings.flag_guard);
+        assert!(!d.settings.open_guarantee);
+        assert_eq!(d.last_difficulty, Difficulty::Intermediate);
     }
 
     #[test]

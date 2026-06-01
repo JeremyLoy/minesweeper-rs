@@ -31,14 +31,15 @@ mine count are the consts `ROWS` / `COLS` / `MINES` in `src/main.rs`.
 
 ## Persistence & meta
 
-- [ ] **Settings persistence** — remember last difficulty, question-mark toggle,
-      and window position between runs.
 - [ ] **Statistics** — games played, win %, win/loss streaks.
 
 - [x] **Best times / high scores** per difficulty, persisted to disk. A tiny,
       dependency-free `key=value` save file (`SaveData`) in the platform config
       dir holds the best completion seconds per preset; a win updates it and the
       header shows the current preset's record (and "New best!" on a record).
+- [x] **Settings persistence** — `SaveData` also stores the option toggles, the
+      last difficulty (restored on launch, with Custom dims), and the window
+      position. Saved on each change and on shutdown (`App::on_exit`).
 
 ## UX & polish
 
