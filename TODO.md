@@ -6,8 +6,6 @@ mine count are the consts `ROWS` / `COLS` / `MINES` in `src/main.rs`.
 
 ## Gameplay features
 
-- [ ] **Lose animation / reveal** — show which flags were wrong (✗) and which
-      mines were missed, like classic Minesweeper, instead of just exposing mines.
 - [x] **Difficulty selector** — Beginner (9×9 / 10), Intermediate (16×16 / 40),
       Expert (30×16 / 99), plus a custom width/height/mines dialog. Board
       dimensions are now runtime fields (`rows`/`cols`/`mines`) on `Minesweeper`;
@@ -27,6 +25,9 @@ mine count are the consts `ROWS` / `COLS` / `MINES` in `src/main.rs`.
       On, the whole 3×3 around the first click is spared, so the clicked cell has
       zero adjacent mines and always floods open a region; off, only the clicked
       cell is spared (safe, but the first reveal may be a bare number).
+- [x] **Lose animation / reveal** — on a loss, missed mines are exposed, the mine
+      you hit is drawn on a red background, and wrong flags (a flag on a non-mine)
+      are crossed out with a red ✗ (`draw_cross`), classic-style.
 
 ## Persistence & meta
 

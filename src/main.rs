@@ -158,7 +158,7 @@ impl Default for Cell {
     }
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 enum Status {
     Playing,
     Won,
@@ -774,6 +774,12 @@ impl Minesweeper {
 
         let center = rect.center();
         match cell.state {
+            // After a loss, a flag on a non-mine is exposed as a wrong guess: the
+            // (absent) mine drawn with a red cross through it, classic-style.
+            CellState::Flagged if self.status == Status::Lost && !cell.mine => {
+                draw_mine(painter, rect);
+                draw_cross(painter, rect);
+            }
             CellState::Flagged => draw_flag(painter, rect),
             // "?" is plain ASCII, so it's safe to draw as text on every platform.
             CellState::Question => {
@@ -845,6 +851,14 @@ fn draw_flag(painter: &egui::Painter, rect: egui::Rect) {
         ],
         egui::Stroke::new(3.0, egui::Color32::BLACK),
     );
+}
+
+/// Draw a red cross — used to mark a wrong flag (a flag on a non-mine cell).
+fn draw_cross(painter: &egui::Painter, rect: egui::Rect) {
+    let m = rect.shrink(rect.width() * 0.2);
+    let stroke = egui::Stroke::new(2.5, egui::Color32::from_rgb(200, 0, 0));
+    painter.line_segment([m.left_top(), m.right_bottom()], stroke);
+    painter.line_segment([m.right_top(), m.left_bottom()], stroke);
 }
 
 /// Draw a mine: a black circle with a few spikes.
@@ -1064,6 +1078,40 @@ mod tests {
             // ...and the full mine count is still placed.
             assert_eq!(mine_count(&g), g.mines);
         }
+    }
+
+    #[test]
+    fn losing_reveals_missed_mines_and_marks_the_hit() {
+        let mut g = Minesweeper::with_dims(3, 3, 1, Difficulty::Custom);
+        g.grid[0][0].mine = true;
+        g.mines_placed = true;
+        recompute_adjacency(&mut g);
+
+        // A wrong flag on a safe cell stays flagged so the renderer can cross it.
+        g.toggle_flag(2, 2);
+        g.reveal(0, 0); // step on the mine
+
+        assert_eq!(g.status, Status::Lost);
+        assert_eq!(g.exploded, Some((0, 0)));
+        assert_eq!(g.grid[0][0].state, CellState::Revealed);
+        assert_eq!(g.grid[2][2].state, CellState::Flagged);
+        assert!(!g.grid[2][2].mine, "the wrong flag is on a non-mine");
+    }
+
+    #[test]
+    fn losing_preserves_correct_flags() {
+        let mut g = Minesweeper::with_dims(3, 3, 2, Difficulty::Custom);
+        g.grid[0][0].mine = true; // will be correctly flagged
+        g.grid[2][2].mine = true; // will be stepped on
+        g.mines_placed = true;
+        recompute_adjacency(&mut g);
+
+        g.toggle_flag(0, 0); // a correct flag
+        g.reveal(2, 2); // lose on the other mine
+
+        assert_eq!(g.status, Status::Lost);
+        assert_eq!(g.grid[0][0].state, CellState::Flagged);
+        assert_eq!(g.grid[2][2].state, CellState::Revealed);
     }
 
     #[test]
