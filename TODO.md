@@ -6,8 +6,6 @@ mine count are the consts `ROWS` / `COLS` / `MINES` in `src/main.rs`.
 
 ## Gameplay features
 
-- [ ] **Question marks (`?`)** — the classic third right-click state
-      (Hidden → Flagged → Question → Hidden), as a toggleable option.
 - [ ] **Chord with both mouse buttons** — support the traditional left+right
       simultaneous click to chord, in addition to the current left-click-on-number.
 - [ ] **Flag-count guard** — optionally prevent placing more flags than there are
@@ -22,6 +20,10 @@ mine count are the consts `ROWS` / `COLS` / `MINES` in `src/main.rs`.
       dimensions are now runtime fields (`rows`/`cols`/`mines`) on `Minesweeper`;
       a combo box switches presets and the window resizes to fit, and a Custom
       dialog takes width/height/mines.
+- [x] **Question marks (`?`)** — the classic third right-click state
+      (Hidden → Flagged → Question → Hidden), as a toggleable option (the `?`
+      checkbox in the header). `?` cells are reminders only — not protected, so
+      they still reveal and flood like hidden cells. Persisted in `Settings`.
 
 ## Persistence & meta
 

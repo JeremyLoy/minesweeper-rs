@@ -109,11 +109,29 @@ impl Rng {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum CellState {
     Hidden,
     Revealed,
     Flagged,
+    /// A "?" mark — a reminder that is *not* protected: it can still be revealed.
+    Question,
+}
+
+/// Player-chosen options that persist across new games (they are not part of a
+/// single board's state, so `reset`/`apply_board` carry them over).
+#[derive(Clone, Copy)]
+struct Settings {
+    /// Whether right-click cycles through a "?" state (Hidden → Flag → ? → Hidden).
+    question_marks: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            question_marks: true,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -161,6 +179,7 @@ struct Minesweeper {
     custom_mines: usize,
     /// Set when the board changes; the next frame resizes the OS window to fit.
     pending_resize: bool,
+    settings: Settings,
 }
 
 impl Minesweeper {
@@ -190,25 +209,32 @@ impl Minesweeper {
             custom_cols: cols,
             custom_mines: mines,
             pending_resize: false,
+            settings: Settings::default(),
         }
+    }
+
+    /// Carry the player's persistent choices (settings and last custom-dialog
+    /// entries) from `self` onto a freshly built board.
+    fn carry_over(&self, fresh: &mut Minesweeper) {
+        fresh.settings = self.settings;
+        fresh.custom_rows = self.custom_rows;
+        fresh.custom_cols = self.custom_cols;
+        fresh.custom_mines = self.custom_mines;
     }
 
     /// Rebuild the board with the same dimensions and difficulty (a fresh game).
     fn reset(&mut self) {
         let mut fresh = Self::with_dims(self.rows, self.cols, self.mines, self.difficulty);
-        // Preserve the player's last custom-dialog entries across a reset.
-        fresh.custom_rows = self.custom_rows;
-        fresh.custom_cols = self.custom_cols;
-        fresh.custom_mines = self.custom_mines;
+        self.carry_over(&mut fresh);
         *self = fresh;
     }
 
     /// Switch to a new board (different size and/or mine count) and start fresh,
     /// requesting an OS-window resize on the next frame.
     fn apply_board(&mut self, rows: usize, cols: usize, mines: usize, difficulty: Difficulty) {
-        let custom = (self.custom_rows, self.custom_cols, self.custom_mines);
-        *self = Self::with_dims(rows, cols, mines, difficulty);
-        (self.custom_rows, self.custom_cols, self.custom_mines) = custom;
+        let mut fresh = Self::with_dims(rows, cols, mines, difficulty);
+        self.carry_over(&mut fresh);
+        *self = fresh;
         self.pending_resize = true;
     }
 
@@ -282,7 +308,8 @@ impl Minesweeper {
                 self.chord(r, c);
                 return;
             }
-            CellState::Hidden => {}
+            // Hidden and "?" cells are both revealable.
+            CellState::Hidden | CellState::Question => {}
         }
 
         if self.grid[r][c].mine {
@@ -302,14 +329,18 @@ impl Minesweeper {
         let mut stack = vec![(r, c)];
         while let Some((r, c)) = stack.pop() {
             let cell = &mut self.grid[r][c];
-            if cell.state != CellState::Hidden || cell.mine {
+            // Only Hidden/"?" cells are revealable; never spread through mines.
+            if matches!(cell.state, CellState::Revealed | CellState::Flagged) || cell.mine {
                 continue;
             }
             cell.state = CellState::Revealed;
             self.revealed_safe += 1;
             if cell.adjacent == 0 {
                 for (nr, nc) in self.neighbors(r, c) {
-                    if self.grid[nr][nc].state == CellState::Hidden {
+                    if matches!(
+                        self.grid[nr][nc].state,
+                        CellState::Hidden | CellState::Question
+                    ) {
                         stack.push((nr, nc));
                     }
                 }
@@ -332,7 +363,10 @@ impl Minesweeper {
             return;
         }
         for (nr, nc) in self.neighbors(r, c) {
-            if self.grid[nr][nc].state == CellState::Hidden {
+            if matches!(
+                self.grid[nr][nc].state,
+                CellState::Hidden | CellState::Question
+            ) {
                 if self.grid[nr][nc].mine {
                     self.grid[nr][nc].state = CellState::Revealed;
                     self.exploded = Some((nr, nc));
@@ -349,14 +383,22 @@ impl Minesweeper {
         if self.status != Status::Playing {
             return;
         }
+        // Right-click cycles Hidden → Flagged → (? if enabled) → Hidden.
         match self.grid[r][c].state {
             CellState::Hidden => {
                 self.grid[r][c].state = CellState::Flagged;
                 self.flags += 1;
             }
             CellState::Flagged => {
-                self.grid[r][c].state = CellState::Hidden;
                 self.flags -= 1;
+                self.grid[r][c].state = if self.settings.question_marks {
+                    CellState::Question
+                } else {
+                    CellState::Hidden
+                };
+            }
+            CellState::Question => {
+                self.grid[r][c].state = CellState::Hidden;
             }
             CellState::Revealed => {}
         }
@@ -499,6 +541,9 @@ impl eframe::App for Minesweeper {
                         None => self.show_custom = true,
                     }
                 }
+
+                ui.checkbox(&mut self.settings.question_marks, "?")
+                    .on_hover_text("Right-click cycles a question mark after the flag");
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let face = match self.status {
@@ -671,6 +716,16 @@ impl Minesweeper {
         let center = rect.center();
         match cell.state {
             CellState::Flagged => draw_flag(painter, rect),
+            // "?" is plain ASCII, so it's safe to draw as text on every platform.
+            CellState::Question => {
+                painter.text(
+                    center,
+                    egui::Align2::CENTER_CENTER,
+                    "?",
+                    egui::FontId::proportional(CELL * 0.6),
+                    egui::Color32::from_gray(60),
+                );
+            }
             CellState::Revealed if cell.mine => draw_mine(painter, rect),
             CellState::Revealed if cell.adjacent > 0 => {
                 painter.text(
@@ -811,5 +866,52 @@ mod tests {
         assert_eq!((g.rows, g.cols, g.mines), (12, 20, 30));
         g.place_mines(5, 5);
         assert_eq!(mine_count(&g), 30);
+    }
+
+    #[test]
+    fn right_click_cycles_through_question_when_enabled() {
+        let mut g = Minesweeper::new(Difficulty::Beginner);
+        g.settings.question_marks = true;
+        assert_eq!(g.grid[0][0].state, CellState::Hidden);
+        g.toggle_flag(0, 0);
+        assert_eq!(g.grid[0][0].state, CellState::Flagged);
+        assert_eq!(g.flags, 1);
+        g.toggle_flag(0, 0);
+        assert_eq!(g.grid[0][0].state, CellState::Question);
+        assert_eq!(g.flags, 0, "a ? does not count as a flag");
+        g.toggle_flag(0, 0);
+        assert_eq!(g.grid[0][0].state, CellState::Hidden);
+    }
+
+    #[test]
+    fn right_click_skips_question_when_disabled() {
+        let mut g = Minesweeper::new(Difficulty::Beginner);
+        g.settings.question_marks = false;
+        g.toggle_flag(0, 0);
+        assert_eq!(g.grid[0][0].state, CellState::Flagged);
+        g.toggle_flag(0, 0);
+        assert_eq!(g.grid[0][0].state, CellState::Hidden);
+    }
+
+    #[test]
+    fn question_marked_cell_is_still_revealable() {
+        let mut g = Minesweeper::with_dims(5, 5, 1, Difficulty::Custom);
+        // Force a known board: single mine in the far corner, rest safe.
+        g.grid[4][4].mine = true;
+        g.mines_placed = true;
+        g.grid[0][0].state = CellState::Question;
+        g.reveal(0, 0);
+        // A "?" cell reveals like a hidden one (it is not protected).
+        assert_eq!(g.grid[0][0].state, CellState::Revealed);
+    }
+
+    #[test]
+    fn settings_persist_across_new_game() {
+        let mut g = Minesweeper::new(Difficulty::Beginner);
+        g.settings.question_marks = false;
+        g.reset();
+        assert!(!g.settings.question_marks);
+        g.apply_board(16, 16, 40, Difficulty::Intermediate);
+        assert!(!g.settings.question_marks);
     }
 }
