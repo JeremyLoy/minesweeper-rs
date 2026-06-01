@@ -6,8 +6,6 @@ mine count are the consts `ROWS` / `COLS` / `MINES` in `src/main.rs`.
 
 ## Gameplay features
 
-- [ ] **Flag-count guard** — optionally prevent placing more flags than there are
-      mines.
 - [ ] **First-click opening guarantee** — optionally regenerate the board until
       the first click opens a zero-region (currently the 3×3 safe zone makes this
       likely but not guaranteed).
@@ -26,6 +24,8 @@ mine count are the consts `ROWS` / `COLS` / `MINES` in `src/main.rs`.
       number and releasing chords it, alongside the existing left-click-on-number.
       The gesture suppresses the individual clicks (so the right-button release
       doesn't drop a flag) and fires the chord on release.
+- [x] **Flag-count guard** — optional `flag_guard` setting (in the new Options
+      menu) that refuses to place more flags than there are mines.
 
 ## Persistence & meta
 

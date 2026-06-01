@@ -124,12 +124,15 @@ enum CellState {
 struct Settings {
     /// Whether right-click cycles through a "?" state (Hidden → Flag → ? → Hidden).
     question_marks: bool,
+    /// Whether to forbid placing more flags than there are mines.
+    flag_guard: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Settings {
             question_marks: true,
+            flag_guard: false,
         }
     }
 }
@@ -394,6 +397,10 @@ impl Minesweeper {
         // Right-click cycles Hidden → Flagged → (? if enabled) → Hidden.
         match self.grid[r][c].state {
             CellState::Hidden => {
+                // Optional guard: never place more flags than there are mines.
+                if self.settings.flag_guard && self.flags >= self.mines as i32 {
+                    return;
+                }
                 self.grid[r][c].state = CellState::Flagged;
                 self.flags += 1;
             }
@@ -550,8 +557,12 @@ impl eframe::App for Minesweeper {
                     }
                 }
 
-                ui.checkbox(&mut self.settings.question_marks, "?")
-                    .on_hover_text("Right-click cycles a question mark after the flag");
+                ui.menu_button("Options", |ui| {
+                    ui.checkbox(&mut self.settings.question_marks, "Question marks (?)")
+                        .on_hover_text("Right-click cycles a question mark after the flag");
+                    ui.checkbox(&mut self.settings.flag_guard, "Flag guard")
+                        .on_hover_text("Don't allow more flags than there are mines");
+                });
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let face = match self.status {
@@ -990,6 +1001,28 @@ mod tests {
         g.reveal(1, 1);
         assert_eq!(g.grid[0][1].state, CellState::Hidden);
         assert_eq!(g.grid[1][0].state, CellState::Hidden);
+    }
+
+    #[test]
+    fn flag_guard_caps_flags_at_mine_count() {
+        let mut g = Minesweeper::with_dims(5, 5, 2, Difficulty::Custom);
+        g.settings.flag_guard = true;
+        g.toggle_flag(0, 0);
+        g.toggle_flag(0, 1);
+        assert_eq!(g.flags, 2);
+        // The third flag is refused — there are only 2 mines.
+        g.toggle_flag(0, 2);
+        assert_eq!(g.flags, 2);
+        assert_eq!(g.grid[0][2].state, CellState::Hidden);
+    }
+
+    #[test]
+    fn without_flag_guard_flags_may_exceed_mines() {
+        let mut g = Minesweeper::with_dims(5, 5, 1, Difficulty::Custom);
+        g.settings.flag_guard = false;
+        g.toggle_flag(0, 0);
+        g.toggle_flag(0, 1);
+        assert_eq!(g.flags, 2);
     }
 
     #[test]
