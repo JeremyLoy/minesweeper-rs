@@ -6,10 +6,6 @@ mine count are the consts `ROWS` / `COLS` / `MINES` in `src/main.rs`.
 
 ## Gameplay features
 
-- [ ] **Difficulty selector** — Beginner (9×9 / 10), Intermediate (16×16 / 40),
-      Expert (30×16 / 99), plus a custom width/height/mines dialog. Requires
-      promoting the board dimensions from consts to runtime fields on
-      `Minesweeper` and resizing the window to fit.
 - [ ] **Question marks (`?`)** — the classic third right-click state
       (Hidden → Flagged → Question → Hidden), as a toggleable option.
 - [ ] **Chord with both mouse buttons** — support the traditional left+right
@@ -21,6 +17,11 @@ mine count are the consts `ROWS` / `COLS` / `MINES` in `src/main.rs`.
       likely but not guaranteed).
 - [ ] **Lose animation / reveal** — show which flags were wrong (✗) and which
       mines were missed, like classic Minesweeper, instead of just exposing mines.
+- [x] **Difficulty selector** — Beginner (9×9 / 10), Intermediate (16×16 / 40),
+      Expert (30×16 / 99), plus a custom width/height/mines dialog. Board
+      dimensions are now runtime fields (`rows`/`cols`/`mines`) on `Minesweeper`;
+      a combo box switches presets and the window resizes to fit, and a Custom
+      dialog takes width/height/mines.
 
 ## Persistence & meta
 

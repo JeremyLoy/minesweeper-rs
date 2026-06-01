@@ -1,6 +1,8 @@
 // Minesweeper — a cross-platform GUI game built with egui/eframe.
 //
-// Classic rules: a 9x9 grid with 10 hidden mines.
+// Classic rules. Board size and mine count are chosen at runtime via the
+// difficulty selector (Beginner 9x9/10, Intermediate 16x16/40, Expert
+// 30x16/99, or a Custom board).
 //   * Left-click   reveals a cell. Revealing a mine ends the game.
 //   * Right-click  toggles a flag on a hidden cell.
 //   * The very first click is always safe — mines are placed *after* it,
@@ -14,16 +16,19 @@
 use eframe::egui;
 use std::time::Instant;
 
-const ROWS: usize = 9;
-const COLS: usize = 9;
-const MINES: usize = 10;
 const CELL: f32 = 34.0; // pixel size of a single cell
 
+/// Padding added around the board to size the OS window: horizontal margin and
+/// the header height above the grid.
+const WIN_PAD_W: f32 = 24.0;
+const WIN_PAD_H: f32 = 110.0;
+
 fn main() -> eframe::Result {
-    let board_w = COLS as f32 * CELL;
+    let (rows, cols, _mines) = Difficulty::Beginner.dims().unwrap();
+    let size = window_size(rows, cols);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([board_w + 24.0, COLS as f32 * CELL + 110.0])
+            .with_inner_size(size)
             .with_resizable(false)
             .with_title("Minesweeper"),
         ..Default::default()
@@ -31,12 +36,52 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Minesweeper",
         options,
-        Box::new(|_cc| Ok(Box::new(Minesweeper::new()))),
+        Box::new(|_cc| Ok(Box::new(Minesweeper::new(Difficulty::Beginner)))),
     )
 }
 
+/// OS-window inner size needed to show a `rows`x`cols` board.
+fn window_size(rows: usize, cols: usize) -> egui::Vec2 {
+    egui::vec2(
+        cols as f32 * CELL + WIN_PAD_W,
+        rows as f32 * CELL + WIN_PAD_H,
+    )
+}
+
+/// The selectable difficulty presets, plus a free-form Custom board.
+#[derive(Clone, Copy, PartialEq)]
+enum Difficulty {
+    Beginner,
+    Intermediate,
+    Expert,
+    Custom,
+}
+
+impl Difficulty {
+    /// Preset board dimensions as `(rows, cols, mines)`. `Custom` has no fixed
+    /// dimensions (the player supplies them), so it returns `None`.
+    fn dims(self) -> Option<(usize, usize, usize)> {
+        match self {
+            Difficulty::Beginner => Some((9, 9, 10)),
+            Difficulty::Intermediate => Some((16, 16, 40)),
+            // Expert is the classic 30-wide by 16-tall board: 16 rows, 30 cols.
+            Difficulty::Expert => Some((16, 30, 99)),
+            Difficulty::Custom => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Difficulty::Beginner => "Beginner",
+            Difficulty::Intermediate => "Intermediate",
+            Difficulty::Expert => "Expert",
+            Difficulty::Custom => "Custom",
+        }
+    }
+}
+
 /// A tiny xorshift64 PRNG so we don't need an external crate just to scatter
-/// ten mines. Seeded from the system clock.
+/// mines. Seeded from the system clock.
 struct Rng(u64);
 
 impl Rng {
@@ -96,6 +141,10 @@ enum Status {
 }
 
 struct Minesweeper {
+    rows: usize,
+    cols: usize,
+    mines: usize,
+    difficulty: Difficulty,
     grid: Vec<Vec<Cell>>,
     status: Status,
     mines_placed: bool,
@@ -105,12 +154,30 @@ struct Minesweeper {
     final_time: Option<f64>,
     /// The cell that ended the game, drawn with a red background.
     exploded: Option<(usize, usize)>,
+    /// Whether the Custom-board dialog is open, and its pending field values.
+    show_custom: bool,
+    custom_rows: usize,
+    custom_cols: usize,
+    custom_mines: usize,
+    /// Set when the board changes; the next frame resizes the OS window to fit.
+    pending_resize: bool,
 }
 
 impl Minesweeper {
-    fn new() -> Self {
+    /// Build a board for the given difficulty. For `Custom`, the dimensions come
+    /// from the dialog fields (defaulted here to a Beginner-like board).
+    fn new(difficulty: Difficulty) -> Self {
+        let (rows, cols, mines) = difficulty.dims().unwrap_or((9, 9, 10));
+        Self::with_dims(rows, cols, mines, difficulty)
+    }
+
+    fn with_dims(rows: usize, cols: usize, mines: usize, difficulty: Difficulty) -> Self {
         Minesweeper {
-            grid: vec![vec![Cell::default(); COLS]; ROWS],
+            rows,
+            cols,
+            mines,
+            difficulty,
+            grid: vec![vec![Cell::default(); cols]; rows],
             status: Status::Playing,
             mines_placed: false,
             revealed_safe: 0,
@@ -118,31 +185,51 @@ impl Minesweeper {
             start: None,
             final_time: None,
             exploded: None,
+            show_custom: false,
+            custom_rows: rows,
+            custom_cols: cols,
+            custom_mines: mines,
+            pending_resize: false,
         }
     }
 
+    /// Rebuild the board with the same dimensions and difficulty (a fresh game).
     fn reset(&mut self) {
-        *self = Minesweeper::new();
+        let mut fresh = Self::with_dims(self.rows, self.cols, self.mines, self.difficulty);
+        // Preserve the player's last custom-dialog entries across a reset.
+        fresh.custom_rows = self.custom_rows;
+        fresh.custom_cols = self.custom_cols;
+        fresh.custom_mines = self.custom_mines;
+        *self = fresh;
+    }
+
+    /// Switch to a new board (different size and/or mine count) and start fresh,
+    /// requesting an OS-window resize on the next frame.
+    fn apply_board(&mut self, rows: usize, cols: usize, mines: usize, difficulty: Difficulty) {
+        let custom = (self.custom_rows, self.custom_cols, self.custom_mines);
+        *self = Self::with_dims(rows, cols, mines, difficulty);
+        (self.custom_rows, self.custom_cols, self.custom_mines) = custom;
+        self.pending_resize = true;
     }
 
     /// Place mines after the first click, keeping the clicked cell and its
     /// neighbors mine-free so the opening move reveals an area.
     fn place_mines(&mut self, safe_r: usize, safe_c: usize) {
         let mut candidates: Vec<(usize, usize)> = Vec::new();
-        for r in 0..ROWS {
-            for c in 0..COLS {
+        for r in 0..self.rows {
+            for c in 0..self.cols {
                 let near = r.abs_diff(safe_r) <= 1 && c.abs_diff(safe_c) <= 1;
                 if !near {
                     candidates.push((r, c));
                 }
             }
         }
-        // With 9x9/10 there is always room, but guard anyway: if excluding the
-        // whole 3x3 safe zone leaves too few cells, fall back to only the click.
-        if candidates.len() < MINES {
+        // Usually there is room, but guard anyway: if excluding the whole 3x3
+        // safe zone leaves too few cells, fall back to only the click.
+        if candidates.len() < self.mines {
             candidates.clear();
-            for r in 0..ROWS {
-                for c in 0..COLS {
+            for r in 0..self.rows {
+                for c in 0..self.cols {
                     if (r, c) != (safe_r, safe_c) {
                         candidates.push((r, c));
                     }
@@ -150,9 +237,10 @@ impl Minesweeper {
             }
         }
 
-        // Partial Fisher–Yates: pick the first MINES after shuffling.
+        // Partial Fisher–Yates: pick the first `mines` after shuffling.
         let mut rng = Rng::new();
-        for i in 0..MINES {
+        let n = self.mines.min(candidates.len());
+        for i in 0..n {
             let j = i + rng.below(candidates.len() - i);
             candidates.swap(i, j);
             let (r, c) = candidates[i];
@@ -160,13 +248,13 @@ impl Minesweeper {
         }
 
         // Compute adjacency counts.
-        for r in 0..ROWS {
-            for c in 0..COLS {
+        for r in 0..self.rows {
+            for c in 0..self.cols {
                 if self.grid[r][c].mine {
                     continue;
                 }
                 let mut count = 0;
-                for (nr, nc) in neighbors(r, c) {
+                for (nr, nc) in self.neighbors(r, c) {
                     if self.grid[nr][nc].mine {
                         count += 1;
                     }
@@ -220,7 +308,7 @@ impl Minesweeper {
             cell.state = CellState::Revealed;
             self.revealed_safe += 1;
             if cell.adjacent == 0 {
-                for (nr, nc) in neighbors(r, c) {
+                for (nr, nc) in self.neighbors(r, c) {
                     if self.grid[nr][nc].state == CellState::Hidden {
                         stack.push((nr, nc));
                     }
@@ -236,13 +324,14 @@ impl Minesweeper {
         if cell.adjacent == 0 {
             return;
         }
-        let flagged = neighbors(r, c)
+        let flagged = self
+            .neighbors(r, c)
             .filter(|&(nr, nc)| self.grid[nr][nc].state == CellState::Flagged)
             .count() as u8;
         if flagged != cell.adjacent {
             return;
         }
-        for (nr, nc) in neighbors(r, c) {
+        for (nr, nc) in self.neighbors(r, c) {
             if self.grid[nr][nc].state == CellState::Hidden {
                 if self.grid[nr][nc].mine {
                     self.grid[nr][nc].state = CellState::Revealed;
@@ -277,8 +366,8 @@ impl Minesweeper {
         self.status = Status::Lost;
         self.freeze_time();
         // Expose every mine.
-        for r in 0..ROWS {
-            for c in 0..COLS {
+        for r in 0..self.rows {
+            for c in 0..self.cols {
                 if self.grid[r][c].mine && self.grid[r][c].state != CellState::Flagged {
                     self.grid[r][c].state = CellState::Revealed;
                 }
@@ -287,12 +376,12 @@ impl Minesweeper {
     }
 
     fn check_win(&mut self) {
-        if self.revealed_safe == ROWS * COLS - MINES {
+        if self.revealed_safe == self.rows * self.cols - self.mines {
             self.status = Status::Won;
             self.freeze_time();
             // Auto-flag the remaining mines for a tidy finish.
-            for r in 0..ROWS {
-                for c in 0..COLS {
+            for r in 0..self.rows {
+                for c in 0..self.cols {
                     if self.grid[r][c].mine && self.grid[r][c].state != CellState::Flagged {
                         self.grid[r][c].state = CellState::Flagged;
                         self.flags += 1;
@@ -316,24 +405,27 @@ impl Minesweeper {
         };
         (secs as u64).min(999)
     }
-}
 
-/// Yields the in-bounds neighbors of `(r, c)`.
-fn neighbors(r: usize, c: usize) -> impl Iterator<Item = (usize, usize)> {
-    let mut out = Vec::with_capacity(8);
-    for dr in -1i32..=1 {
-        for dc in -1i32..=1 {
-            if dr == 0 && dc == 0 {
-                continue;
-            }
-            let nr = r as i32 + dr;
-            let nc = c as i32 + dc;
-            if nr >= 0 && nr < ROWS as i32 && nc >= 0 && nc < COLS as i32 {
-                out.push((nr as usize, nc as usize));
+    /// Yields the in-bounds neighbors of `(r, c)`. Returns an owned iterator
+    /// (not borrowing `self`) so callers can keep mutating `self.grid` while
+    /// iterating.
+    fn neighbors(&self, r: usize, c: usize) -> std::vec::IntoIter<(usize, usize)> {
+        let (rows, cols) = (self.rows, self.cols);
+        let mut out = Vec::with_capacity(8);
+        for dr in -1i32..=1 {
+            for dc in -1i32..=1 {
+                if dr == 0 && dc == 0 {
+                    continue;
+                }
+                let nr = r as i32 + dr;
+                let nc = c as i32 + dc;
+                if nr >= 0 && nr < rows as i32 && nc >= 0 && nc < cols as i32 {
+                    out.push((nr as usize, nc as usize));
+                }
             }
         }
+        out.into_iter()
     }
-    out.into_iter()
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +434,15 @@ fn neighbors(r: usize, c: usize) -> impl Iterator<Item = (usize, usize)> {
 
 impl eframe::App for Minesweeper {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Resize the OS window to fit a freshly chosen board.
+        if self.pending_resize {
+            self.pending_resize = false;
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::InnerSize(window_size(
+                    self.rows, self.cols,
+                )));
+        }
+
         // Keep the timer ticking while the game is live.
         if self.status == Status::Playing && self.mines_placed {
             ui.ctx()
@@ -352,7 +453,7 @@ impl eframe::App for Minesweeper {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 // Mines remaining (mines minus flags placed).
-                let remaining = MINES as i32 - self.flags;
+                let remaining = self.mines as i32 - self.flags;
                 ui.label(
                     egui::RichText::new(format!("Mines {remaining:>3}"))
                         .monospace()
@@ -371,45 +472,78 @@ impl eframe::App for Minesweeper {
             });
 
             ui.add_space(4.0);
-            ui.vertical_centered(|ui| {
-                let face = match self.status {
-                    Status::Playing => ":)",
-                    Status::Won => "B)",
-                    Status::Lost => ":(",
-                };
-                if ui
-                    .add_sized(
-                        [44.0, 34.0],
-                        egui::Button::new(egui::RichText::new(face).size(20.0).strong()),
-                    )
-                    .on_hover_text("New game")
-                    .clicked()
-                {
-                    self.reset();
+            ui.horizontal(|ui| {
+                // Difficulty selector.
+                let mut chosen: Option<Difficulty> = None;
+                egui::ComboBox::from_id_salt("difficulty")
+                    .selected_text(self.difficulty.label())
+                    .show_ui(ui, |ui| {
+                        for d in [
+                            Difficulty::Beginner,
+                            Difficulty::Intermediate,
+                            Difficulty::Expert,
+                            Difficulty::Custom,
+                        ] {
+                            if ui
+                                .selectable_label(self.difficulty == d, d.label())
+                                .clicked()
+                            {
+                                chosen = Some(d);
+                            }
+                        }
+                    });
+                if let Some(d) = chosen {
+                    match d.dims() {
+                        Some((rows, cols, mines)) => self.apply_board(rows, cols, mines, d),
+                        // Custom: open the dialog instead of switching immediately.
+                        None => self.show_custom = true,
+                    }
                 }
-                match self.status {
-                    Status::Won => {
-                        ui.label(egui::RichText::new("You win!").strong());
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let face = match self.status {
+                        Status::Playing => ":)",
+                        Status::Won => "B)",
+                        Status::Lost => ":(",
+                    };
+                    if ui
+                        .add_sized(
+                            [44.0, 30.0],
+                            egui::Button::new(egui::RichText::new(face).size(20.0).strong()),
+                        )
+                        .on_hover_text("New game")
+                        .clicked()
+                    {
+                        self.reset();
                     }
-                    Status::Lost => {
-                        ui.label(egui::RichText::new("Boom! Try again.").strong());
-                    }
-                    Status::Playing => {
-                        ui.label("Left-click reveal · Right-click flag");
-                    }
+                });
+            });
+
+            ui.add_space(4.0);
+            ui.vertical_centered(|ui| match self.status {
+                Status::Won => {
+                    ui.label(egui::RichText::new("You win!").strong());
+                }
+                Status::Lost => {
+                    ui.label(egui::RichText::new("Boom! Try again.").strong());
+                }
+                Status::Playing => {
+                    ui.label("Left-click reveal · Right-click flag");
                 }
             });
             ui.add_space(6.0);
         });
+
+        self.custom_dialog(ui.ctx());
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
             let mut left_click: Option<(usize, usize)> = None;
             let mut right_click: Option<(usize, usize)> = None;
 
             ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-            for r in 0..ROWS {
+            for r in 0..self.rows {
                 ui.horizontal(|ui| {
-                    for c in 0..COLS {
+                    for c in 0..self.cols {
                         let resp = self.draw_cell(ui, r, c);
                         if resp.clicked() {
                             left_click = Some((r, c));
@@ -432,6 +566,48 @@ impl eframe::App for Minesweeper {
 }
 
 impl Minesweeper {
+    /// The Custom-board dialog: pick width, height, and mine count, then start.
+    fn custom_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_custom {
+            return;
+        }
+        let mut open = true;
+        let mut start = false;
+        egui::Window::new("Custom board")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                egui::Grid::new("custom_fields").show(ui, |ui| {
+                    ui.label("Width (cols)");
+                    ui.add(egui::DragValue::new(&mut self.custom_cols).range(5..=40));
+                    ui.end_row();
+                    ui.label("Height (rows)");
+                    ui.add(egui::DragValue::new(&mut self.custom_rows).range(5..=24));
+                    ui.end_row();
+                    // Cap mines so a 3x3 first-click safe zone always fits.
+                    let max_mines = (self.custom_rows * self.custom_cols)
+                        .saturating_sub(9)
+                        .max(1);
+                    self.custom_mines = self.custom_mines.clamp(1, max_mines);
+                    ui.label("Mines");
+                    ui.add(egui::DragValue::new(&mut self.custom_mines).range(1..=max_mines));
+                    ui.end_row();
+                });
+                ui.add_space(4.0);
+                if ui.button("Start").clicked() {
+                    start = true;
+                }
+            });
+        if start {
+            let (r, c, m) = (self.custom_rows, self.custom_cols, self.custom_mines);
+            self.apply_board(r, c, m, Difficulty::Custom);
+            self.show_custom = false;
+        } else if !open {
+            self.show_custom = false;
+        }
+    }
+
     fn draw_cell(&self, ui: &mut egui::Ui, r: usize, c: usize) -> egui::Response {
         let cell = self.grid[r][c];
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(CELL, CELL), egui::Sense::click());
@@ -576,4 +752,64 @@ fn draw_mine(painter: &egui::Painter, rect: egui::Rect) {
         radius * 0.28,
         egui::Color32::from_gray(230),
     );
+}
+
+// ---------------------------------------------------------------------------
+// Tests — pure game logic only (no egui). See CLAUDE.md "Testing philosophy".
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Count mines on the board.
+    fn mine_count(g: &Minesweeper) -> usize {
+        g.grid.iter().flatten().filter(|cell| cell.mine).count()
+    }
+
+    #[test]
+    fn presets_have_expected_dims() {
+        assert_eq!(Difficulty::Beginner.dims(), Some((9, 9, 10)));
+        assert_eq!(Difficulty::Intermediate.dims(), Some((16, 16, 40)));
+        assert_eq!(Difficulty::Expert.dims(), Some((16, 30, 99)));
+        assert_eq!(Difficulty::Custom.dims(), None);
+    }
+
+    #[test]
+    fn new_board_matches_difficulty() {
+        for d in [
+            Difficulty::Beginner,
+            Difficulty::Intermediate,
+            Difficulty::Expert,
+        ] {
+            let (rows, cols, mines) = d.dims().unwrap();
+            let g = Minesweeper::new(d);
+            assert_eq!(g.rows, rows);
+            assert_eq!(g.cols, cols);
+            assert_eq!(g.mines, mines);
+            assert_eq!(g.grid.len(), rows);
+            assert_eq!(g.grid[0].len(), cols);
+        }
+    }
+
+    #[test]
+    fn place_mines_lays_exact_count_for_each_preset() {
+        for d in [
+            Difficulty::Beginner,
+            Difficulty::Intermediate,
+            Difficulty::Expert,
+        ] {
+            let mut g = Minesweeper::new(d);
+            g.place_mines(0, 0);
+            assert_eq!(mine_count(&g), g.mines, "{} mine count", d.label());
+        }
+    }
+
+    #[test]
+    fn custom_board_has_requested_shape() {
+        let mut g = Minesweeper::with_dims(12, 20, 30, Difficulty::Custom);
+        assert_eq!((g.rows, g.cols, g.mines), (12, 20, 30));
+        g.place_mines(5, 5);
+        assert_eq!(mine_count(&g), 30);
+    }
 }
