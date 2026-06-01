@@ -11,10 +11,17 @@
 //   * Left-clicking an already-revealed number whose adjacent flags match
 //     that number "chords": it reveals the remaining neighbors at once.
 
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // no console window in release
+// No console window in release on Windows. Gated to Windows so the attribute is
+// not emitted for the wasm (web) build.
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"),
+    windows_subsystem = "windows"
+)]
 
 use eframe::egui;
-use std::time::Instant;
+// `web-time` mirrors `std::time` on native and uses the browser clock on wasm,
+// where `std::time::Instant`/`SystemTime` panic.
+use web_time::Instant;
 
 const CELL: f32 = 34.0; // pixel size of a single cell
 
@@ -23,10 +30,27 @@ const CELL: f32 = 34.0; // pixel size of a single cell
 const WIN_PAD_W: f32 = 24.0;
 const WIN_PAD_H: f32 = 132.0;
 
+/// Build the app from persisted data (shared by the native and web entry points).
+fn make_app() -> Minesweeper {
+    let data = SaveData::load();
+    let (rows, cols, mines) = data.last_difficulty.dims().unwrap_or(data.custom);
+    // Presets build straight from the difficulty; Custom needs the saved dims.
+    let mut app = match data.last_difficulty {
+        Difficulty::Custom => Minesweeper::with_dims(rows, cols, mines, Difficulty::Custom),
+        preset => Minesweeper::new(preset),
+    };
+    app.save = data;
+    app.settings = data.settings;
+    (app.custom_rows, app.custom_cols, app.custom_mines) = data.custom;
+    app
+}
+
+/// Native entry point: a fixed-size desktop window.
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
     let data = SaveData::load();
     // Restore the last board (presets have fixed dims; Custom uses saved dims).
-    let (rows, cols, mines) = data.last_difficulty.dims().unwrap_or(data.custom);
+    let (rows, cols, _mines) = data.last_difficulty.dims().unwrap_or(data.custom);
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size(window_size(rows, cols))
         .with_resizable(false)
@@ -41,18 +65,39 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Minesweeper",
         options,
-        Box::new(move |_cc| {
-            // Presets build straight from the difficulty; Custom needs the dims.
-            let mut app = match data.last_difficulty {
-                Difficulty::Custom => Minesweeper::with_dims(rows, cols, mines, Difficulty::Custom),
-                preset => Minesweeper::new(preset),
-            };
-            app.save = data;
-            app.settings = data.settings;
-            (app.custom_rows, app.custom_cols, app.custom_mines) = data.custom;
-            Ok(Box::new(app))
-        }),
+        Box::new(|_cc| Ok(Box::new(make_app()))),
     )
+}
+
+/// Web entry point: mount the app onto the `<canvas>` in `index.html`. Trunk's
+/// generated loader calls this `main`.
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    use eframe::wasm_bindgen::JsCast as _;
+
+    let web_options = eframe::WebOptions::default();
+    wasm_bindgen_futures::spawn_local(async {
+        let document = eframe::web_sys::window()
+            .expect("no window")
+            .document()
+            .expect("no document");
+        let canvas = document
+            .get_element_by_id("the_canvas_id")
+            .expect("missing element with id 'the_canvas_id'")
+            .dyn_into::<eframe::web_sys::HtmlCanvasElement>()
+            .expect("'the_canvas_id' is not a <canvas>");
+        let result = eframe::WebRunner::new()
+            .start(
+                canvas,
+                web_options,
+                Box::new(|_cc| Ok(Box::new(make_app()))),
+            )
+            .await;
+        // eframe installs a panic hook on web, so this surfaces in the console.
+        if let Err(e) = result {
+            panic!("eframe failed to start: {e:?}");
+        }
+    });
 }
 
 /// OS-window inner size needed to show a `rows`x`cols` board.
@@ -123,8 +168,8 @@ struct Rng(u64);
 
 impl Rng {
     fn new() -> Self {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let seed = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0x9E3779B97F4A7C15)
             | 1; // never zero
@@ -949,8 +994,18 @@ impl eframe::App for Minesweeper {
     }
 
     /// Persist on shutdown so the window position and any settings/difficulty
-    /// changes survive even when they weren't separately saved this run.
+    /// changes survive even when they weren't separately saved this run. (On web
+    /// there is no config dir, so this is a harmless no-op.)
+    ///
+    /// The trait signature depends on the renderer: the glow (web) build passes
+    /// a `glow::Context`, the wgpu (native) build takes none.
+    #[cfg(not(target_arch = "wasm32"))]
     fn on_exit(&mut self) {
+        self.persist();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.persist();
     }
 }

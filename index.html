@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, user-scalable=no"
+    />
+    <title>Minesweeper</title>
+
+    <!-- Trunk builds this Rust crate to wasm and wires up the loader. -->
+    <link data-trunk rel="rust" data-wasm-opt="2" />
+
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #1e1e1e;
+      }
+      /* eframe sizes the canvas to its parent; fill the viewport. */
+      canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+      }
+      #loading {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #bbb;
+        font: 16px system-ui, sans-serif;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="loading">Loading Minesweeper…</div>
+    <canvas id="the_canvas_id"></canvas>
+    <script>
+      // Hide the loading text once the canvas has been painted.
+      const canvas = document.getElementById("the_canvas_id");
+      const obs = new MutationObserver(() => {
+        const el = document.getElementById("loading");
+        if (el) el.remove();
+        obs.disconnect();
+      });
+      obs.observe(canvas, { attributes: true });
+    </script>
+  </body>
+</html>

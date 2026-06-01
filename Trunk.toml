@@ -1,0 +1,10 @@
+# Trunk configuration for the web (WASM) build.
+# Build:        trunk build --release
+# Local server: trunk serve   (then open http://localhost:8080)
+
+[build]
+target = "index.html"
+dist = "dist"
+
+[serve]
+port = 8080

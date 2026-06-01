@@ -65,7 +65,12 @@ mine count are the consts `ROWS` / `COLS` / `MINES` in `src/main.rs`.
       sitting.
 - [ ] **CI** — GitHub Actions matrix (Windows/macOS/Linux) running
       `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`.
-- [ ] **Web build** — egui compiles to WASM; add a `trunk`/`wasm` target so the
-      game can run in a browser from the same codebase.
 - [ ] **Seeded games** — expose the RNG seed so a specific board can be shared or
       replayed (helps testing and "daily puzzle" ideas).
+
+- [x] **Web build** — the same codebase compiles to WebAssembly (eframe's glow /
+      WebGL2 renderer). A wasm `main` mounts the app onto a `<canvas>` via
+      `eframe::WebRunner`; `web-time` replaces `std::time` (which panics on
+      `wasm32-unknown-unknown`). `Trunk.toml` + `index.html` build it, and the
+      `Deploy web build to GitHub Pages` workflow (`.github/workflows/deploy-web.yml`)
+      publishes it to Pages on every push to `main`. Native is unchanged (wgpu).

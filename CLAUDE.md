@@ -20,6 +20,32 @@ cargo clippy           # lint
 
 The code should compile with **zero warnings** — keep it that way.
 
+### Web build (WASM)
+
+The same `src/main.rs` also targets the browser. A `#[cfg(target_arch = "wasm32")]`
+`main` mounts the app onto the `<canvas>` in `index.html` via `eframe::WebRunner`;
+the native `main` is `#[cfg(not(target_arch = "wasm32"))]`. Both share `make_app()`.
+
+```sh
+trunk serve --release          # local dev server at http://localhost:8080
+trunk build --release          # output to dist/
+```
+
+Key web-specific points:
+
+- **Renderer split** (`Cargo.toml`): native uses eframe's default **wgpu**; the
+  `wasm32` target uses **glow** (WebGL2) via per-target dependency tables. Because
+  Cargo unifies features per target graph, native is completely unaffected.
+- **Time:** use `web-time` (`web_time::Instant`/`SystemTime`), *not* `std::time` —
+  `std`'s clock **panics** on `wasm32-unknown-unknown`. `web-time` re-exports `std`
+  on native, so it's a no-cost alias there.
+- **`on_exit` signature differs by renderer:** glow passes `Option<&glow::Context>`,
+  wgpu takes none — hence the two `#[cfg]`'d `on_exit` methods.
+- **Persistence** silently no-ops on web (no config dir), so the game still runs.
+- **Deploy:** `.github/workflows/deploy-web.yml` builds with Trunk and publishes to
+  GitHub Pages on push to `main`, using `--public-url "/<repo>/"` for project-site
+  routing.
+
 ### Toolchain (important on Windows)
 
 Build with the **MSVC** toolchain: `stable-x86_64-pc-windows-msvc`. It requires
