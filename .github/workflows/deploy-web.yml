@@ -22,21 +22,34 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Only GitHub's own actions/* are used; the Rust toolchain (preinstalled on
+    # the runner) and Trunk are set up with plain shell steps to avoid relying
+    # on third-party actions.
+    env:
+      TRUNK_VERSION: v0.21.14
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust (stable) + wasm target
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      - name: Add wasm target
+        # rustup + a stable toolchain are preinstalled on ubuntu-latest.
+        run: rustup target add wasm32-unknown-unknown
 
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-wasm-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-wasm-
 
       - name: Install Trunk
-        uses: jetli/trunk-action@v0.5.0
-        with:
-          version: latest
+        # Drop the prebuilt binary onto PATH (~/.cargo/bin). Trunk downloads the
+        # matching wasm-bindgen and wasm-opt itself at build time.
+        run: |
+          curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xzf - -C "$HOME/.cargo/bin"
 
       # GitHub Pages serves a project site under /<repo>/, so the asset URLs
       # must be prefixed with the repository name.
