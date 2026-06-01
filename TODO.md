@@ -31,11 +31,14 @@ mine count are the consts `ROWS` / `COLS` / `MINES` in `src/main.rs`.
 
 ## Persistence & meta
 
-- [ ] **Best times / high scores** per difficulty, persisted to disk
-      (e.g. via `eframe`'s storage or a small JSON file in the config dir).
 - [ ] **Settings persistence** — remember last difficulty, question-mark toggle,
       and window position between runs.
 - [ ] **Statistics** — games played, win %, win/loss streaks.
+
+- [x] **Best times / high scores** per difficulty, persisted to disk. A tiny,
+      dependency-free `key=value` save file (`SaveData`) in the platform config
+      dir holds the best completion seconds per preset; a win updates it and the
+      header shows the current preset's record (and "New best!" on a record).
 
 ## UX & polish
 

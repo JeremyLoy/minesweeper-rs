@@ -21,7 +21,7 @@ const CELL: f32 = 34.0; // pixel size of a single cell
 /// Padding added around the board to size the OS window: horizontal margin and
 /// the header height above the grid.
 const WIN_PAD_W: f32 = 24.0;
-const WIN_PAD_H: f32 = 110.0;
+const WIN_PAD_H: f32 = 132.0;
 
 fn main() -> eframe::Result {
     let (rows, cols, _mines) = Difficulty::Beginner.dims().unwrap();
@@ -36,7 +36,11 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Minesweeper",
         options,
-        Box::new(|_cc| Ok(Box::new(Minesweeper::new(Difficulty::Beginner)))),
+        Box::new(|_cc| {
+            let mut app = Minesweeper::new(Difficulty::Beginner);
+            app.save = SaveData::load();
+            Ok(Box::new(app))
+        }),
     )
 }
 
@@ -76,6 +80,17 @@ impl Difficulty {
             Difficulty::Intermediate => "Intermediate",
             Difficulty::Expert => "Expert",
             Difficulty::Custom => "Custom",
+        }
+    }
+
+    /// Index into the persisted best-times array. Only the three presets are
+    /// ranked; `Custom` boards vary too much to compare, so they return `None`.
+    fn preset_index(self) -> Option<usize> {
+        match self {
+            Difficulty::Beginner => Some(0),
+            Difficulty::Intermediate => Some(1),
+            Difficulty::Expert => Some(2),
+            Difficulty::Custom => None,
         }
     }
 }
@@ -193,6 +208,10 @@ struct Minesweeper {
     /// instead of revealing/flagging).
     armed_chord: Option<(usize, usize)>,
     chord_gesture: bool,
+    /// Records and other data persisted between runs.
+    save: SaveData,
+    /// True for the rest of the game after a win that set a new best time.
+    new_record: bool,
 }
 
 impl Minesweeper {
@@ -225,6 +244,8 @@ impl Minesweeper {
             settings: Settings::default(),
             armed_chord: None,
             chord_gesture: false,
+            save: SaveData::default(),
+            new_record: false,
         }
     }
 
@@ -235,6 +256,7 @@ impl Minesweeper {
         fresh.custom_rows = self.custom_rows;
         fresh.custom_cols = self.custom_cols;
         fresh.custom_mines = self.custom_mines;
+        fresh.save = self.save;
     }
 
     /// Rebuild the board with the same dimensions and difficulty (a fresh game).
@@ -453,7 +475,25 @@ impl Minesweeper {
                     }
                 }
             }
+            // Record a new best time for ranked (preset) difficulties.
+            let secs = self.final_time.unwrap_or(0.0).floor() as u32;
+            if self.maybe_record_best(secs) {
+                self.new_record = true;
+                self.save.save();
+            }
         }
+    }
+
+    /// Update the stored best time for the current preset if `secs` beats it.
+    /// Returns whether a new record was set. Custom boards are never ranked.
+    fn maybe_record_best(&mut self, secs: u32) -> bool {
+        if let Some(i) = self.difficulty.preset_index()
+            && self.save.best[i].is_none_or(|b| secs < b)
+        {
+            self.save.best[i] = Some(secs);
+            return true;
+        }
+        false
     }
 
     fn freeze_time(&mut self) {
@@ -490,6 +530,103 @@ impl Minesweeper {
             }
         }
         out.into_iter()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Persistence — a tiny `key=value` file in the platform config dir. We roll our
+// own (rather than enabling eframe's `persistence` feature, which pulls in
+// serde/ron) to keep dependencies minimal, matching the xorshift-over-rand call.
+// ---------------------------------------------------------------------------
+
+/// Everything we remember between runs. Grows over time; the parser tolerates
+/// missing keys, so old files load fine after new fields are added.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+struct SaveData {
+    /// Best (lowest) completion time in seconds per preset, in `preset_index`
+    /// order. `None` means no record yet.
+    best: [Option<u32>; 3],
+}
+
+impl SaveData {
+    fn serialize(&self) -> String {
+        let keys = ["best_beginner", "best_intermediate", "best_expert"];
+        let mut s = String::new();
+        for (i, key) in keys.iter().enumerate() {
+            if let Some(v) = self.best[i] {
+                s.push_str(&format!("{key}={v}\n"));
+            }
+        }
+        s
+    }
+
+    fn parse(text: &str) -> SaveData {
+        let mut d = SaveData::default();
+        for line in text.lines() {
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
+            match k.trim() {
+                "best_beginner" => d.best[0] = v.trim().parse().ok(),
+                "best_intermediate" => d.best[1] = v.trim().parse().ok(),
+                "best_expert" => d.best[2] = v.trim().parse().ok(),
+                _ => {}
+            }
+        }
+        d
+    }
+
+    fn load() -> SaveData {
+        config_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|t| SaveData::parse(&t))
+            .unwrap_or_default()
+    }
+
+    fn save(&self) {
+        if let Some(p) = config_path() {
+            let _ = std::fs::write(p, self.serialize());
+        }
+    }
+}
+
+/// Path to the save file, creating its parent directory. `None` if no config
+/// directory can be resolved (then persistence is silently skipped).
+fn config_path() -> Option<std::path::PathBuf> {
+    let mut dir = config_base()?;
+    dir.push("minesweeper-rs");
+    std::fs::create_dir_all(&dir).ok()?;
+    dir.push("state.txt");
+    Some(dir)
+}
+
+/// The platform's per-user config directory.
+fn config_base() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME").map(|h| {
+            let mut p = PathBuf::from(h);
+            p.push("Library");
+            p.push("Application Support");
+            p
+        })
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| {
+                    let mut p = PathBuf::from(h);
+                    p.push(".config");
+                    p
+                })
+            })
     }
 }
 
@@ -534,6 +671,18 @@ impl eframe::App for Minesweeper {
                             .strong(),
                     );
                 });
+            });
+
+            // Best time for the current preset (Custom boards aren't ranked).
+            ui.vertical_centered(|ui| {
+                let text = match self.difficulty.preset_index() {
+                    Some(i) => {
+                        let best = self.save.best[i].map_or("—".to_string(), |s| format!("{s}s"));
+                        format!("Best ({}): {best}", self.difficulty.label())
+                    }
+                    None => "Custom board — not ranked".to_string(),
+                };
+                ui.label(egui::RichText::new(text).weak());
             });
 
             ui.add_space(4.0);
@@ -598,7 +747,12 @@ impl eframe::App for Minesweeper {
             ui.add_space(4.0);
             ui.vertical_centered(|ui| match self.status {
                 Status::Won => {
-                    ui.label(egui::RichText::new("You win!").strong());
+                    let msg = if self.new_record {
+                        "You win! New best!"
+                    } else {
+                        "You win!"
+                    };
+                    ui.label(egui::RichText::new(msg).strong());
                 }
                 Status::Lost => {
                     ui.label(egui::RichText::new("Boom! Try again.").strong());
@@ -1112,6 +1266,48 @@ mod tests {
         assert_eq!(g.status, Status::Lost);
         assert_eq!(g.grid[0][0].state, CellState::Flagged);
         assert_eq!(g.grid[2][2].state, CellState::Revealed);
+    }
+
+    #[test]
+    fn best_time_records_only_improvements() {
+        let mut g = Minesweeper::new(Difficulty::Beginner);
+        assert!(g.maybe_record_best(50));
+        assert_eq!(g.save.best[0], Some(50));
+        assert!(!g.maybe_record_best(60)); // slower — not a record
+        assert_eq!(g.save.best[0], Some(50));
+        assert!(g.maybe_record_best(40)); // faster — new record
+        assert_eq!(g.save.best[0], Some(40));
+    }
+
+    #[test]
+    fn best_time_not_tracked_for_custom() {
+        let mut g = Minesweeper::with_dims(8, 8, 5, Difficulty::Custom);
+        assert!(!g.maybe_record_best(10));
+        assert_eq!(g.save, SaveData::default());
+    }
+
+    #[test]
+    fn savedata_roundtrips_through_text() {
+        let d = SaveData {
+            best: [Some(12), None, Some(305)],
+        };
+        assert_eq!(SaveData::parse(&d.serialize()), d);
+    }
+
+    #[test]
+    fn savedata_parse_ignores_garbage_and_missing_keys() {
+        let d = SaveData::parse("best_beginner=7\njunk line\nbest_expert=not_a_number\n");
+        assert_eq!(d.best, [Some(7), None, None]);
+    }
+
+    #[test]
+    fn best_times_carry_over_to_new_games() {
+        let mut g = Minesweeper::new(Difficulty::Beginner);
+        g.save.best = [Some(33), None, None];
+        g.reset();
+        assert_eq!(g.save.best[0], Some(33));
+        g.apply_board(16, 16, 40, Difficulty::Intermediate);
+        assert_eq!(g.save.best[0], Some(33));
     }
 
     #[test]
